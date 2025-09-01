@@ -182,13 +182,36 @@ with tab1:
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        base_cycles_per_year = st.number_input(
-            "Annual Cycles",
-            min_value=100,
-            max_value=500,
-            value=365,
-            help="Contract assumes 365 cycles/year"
+        # Cycles per day selector with more options
+        cycle_options = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, "Custom"]
+        cycles_selection = st.selectbox(
+            "Daily Cycling Pattern",
+            options=cycle_options,
+            index=2,  # Default to 1.0 cycles per day
+            format_func=lambda x: f"{x} cycle{'s' if x != 1 else ''}/day" if x != "Custom" else "Custom",
+            help="Number of complete charge-discharge cycles per day. Higher cycling can increase revenue but accelerates degradation."
         )
+        
+        # Handle custom input
+        if cycles_selection == "Custom":
+            cycles_per_day = st.number_input(
+                "Enter custom cycles/day",
+                min_value=0.1,
+                max_value=5.0,
+                value=1.0,
+                step=0.1,
+                format="%.1f"
+            )
+        else:
+            cycles_per_day = cycles_selection
+        
+        # Calculate and display annual cycles
+        base_cycles_per_year = cycles_per_day * 365
+        st.caption(f"→ {base_cycles_per_year:.0f} cycles/year")
+        
+        # Add note about CATL contract reference
+        if abs(cycles_per_day - 1.0) > 0.1:
+            st.caption("⚠️ Contract assumes 365 cycles/year (1.0/day)")
         
     with col2:
         project_lifetime = st.slider(
@@ -333,7 +356,7 @@ with tab4:
         )
     
     st.markdown("#### Extended Warranty Pricing")
-    st.caption("As specified in the contract")
+    st.caption("As specified in contract")
     
     col1, col2 = st.columns(2)
     
@@ -406,9 +429,27 @@ class BESSMonteCarloSimulation:
         """Calculate capacity degradation over project lifetime"""
         years = np.arange(0, self.params['project_lifetime'] + 1)
         
+        # Adjust degradation based on cycling intensity
+        cycles_per_day = self.params.get('cycles_per_day', 1.0)
+        cycle_stress_factor = 1.0
+        if cycles_per_day > 1.0:
+            # Higher cycling accelerates degradation
+            cycle_stress_factor = 1.0 + (cycles_per_day - 1.0) * 0.15
+        elif cycles_per_day < 1.0:
+            # Lower cycling reduces degradation
+            cycle_stress_factor = 0.9 + cycles_per_day * 0.1
+        
         if scenario_type == "Guaranteed (Contract)":
-            # Use contract values for first 3 years
+            # Use contract values for first 3 years, adjusted for cycling
             guaranteed_values = [100, 94.40, 91.11, 88.97]
+            
+            # Adjust guaranteed values based on cycling pattern if different from contract assumption
+            if abs(cycles_per_day - 1.0) > 0.1:
+                for i in range(1, len(guaranteed_values)):
+                    degradation = 100 - guaranteed_values[i]
+                    adjusted_degradation = degradation * cycle_stress_factor
+                    guaranteed_values[i] = 100 - adjusted_degradation
+            
             if len(years) <= 3:
                 return guaranteed_values[:len(years)]
             
@@ -416,14 +457,16 @@ class BESSMonteCarloSimulation:
             capacity_retention[:4] = guaranteed_values
             
             for i in range(4, len(years)):
-                annual_deg = self.params['annual_degradation'] * (1 + np.random.normal(0, self.params['degradation_uncertainty']/100))
+                annual_deg = self.params['annual_degradation'] * cycle_stress_factor
+                annual_deg *= (1 + np.random.normal(0, self.params['degradation_uncertainty']/100))
                 capacity_retention[i] = capacity_retention[i-1] * (1 - annual_deg/100)
         else:
             capacity_retention = np.zeros(len(years))
             capacity_retention[0] = 100
             
             for i in range(1, len(years)):
-                annual_deg = self.params['annual_degradation'] * (1 + np.random.normal(0, self.params['degradation_uncertainty']/100))
+                annual_deg = self.params['annual_degradation'] * cycle_stress_factor
+                annual_deg *= (1 + np.random.normal(0, self.params['degradation_uncertainty']/100))
                 capacity_retention[i] = capacity_retention[i-1] * (1 - annual_deg/100)
                 
         return capacity_retention
@@ -432,7 +475,28 @@ class BESSMonteCarloSimulation:
         """Calculate annual revenue based on capacity and market conditions"""
         effective_capacity = self.params['initial_capacity'] * (capacity_retention/100)
         
-        price_spread = self.params['avg_price_spread'] * (1 + self.params['price_growth_rate']/100)**year
+        # Base price spread with annual growth
+        base_spread = self.params['avg_price_spread'] * (1 + self.params['price_growth_rate']/100)**year
+        
+        # Adjust price spread based on cycling pattern
+        # More cycles per day might mean capturing less optimal spreads
+        cycles_per_day = self.params.get('cycles_per_day', 1.0)
+        if cycles_per_day <= 1.0:
+            # Single cycle captures best daily spread
+            spread_efficiency = 1.0
+        elif cycles_per_day <= 1.5:
+            # 1.5 cycles: one optimal, one sub-optimal
+            spread_efficiency = 0.90
+        elif cycles_per_day <= 2.0:
+            # 2 cycles: morning and evening peaks
+            spread_efficiency = 0.85
+        else:
+            # More than 2 cycles: diminishing returns
+            spread_efficiency = 0.85 - (cycles_per_day - 2.0) * 0.05
+            spread_efficiency = max(spread_efficiency, 0.70)  # Floor at 70%
+        
+        # Apply volatility and efficiency adjustment
+        price_spread = base_spread * spread_efficiency
         price_spread *= (1 + np.random.normal(0, self.params['price_volatility']/100))
         
         energy_revenue = (
@@ -527,6 +591,7 @@ if run_simulation:
         'power_rating': power_rating,
         'roundtrip_efficiency': roundtrip_efficiency,
         'base_cycles_per_year': base_cycles_per_year,
+        'cycles_per_day': cycles_per_day,  # Add cycles per day to params
         'project_lifetime': project_lifetime,
         'discount_rate': discount_rate,
         'avg_price_spread': avg_price_spread,
