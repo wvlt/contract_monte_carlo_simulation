@@ -95,9 +95,9 @@ with st.container():
     **Step 1:** Configure your system parameters across the five tabs below  
     **Step 2:** Adjust simulation settings in the sidebar (number of iterations)  
     **Step 3:** Click 'Run Simulation' to generate probabilistic analysis  
-    **Step 4:** Review results and recommendations below  
+    **Step 4:** Review three-scenario comparison: No Extension vs Performance Only vs Full Warranty  
     
-    *Each parameter change will affect the NPV calculation. Hover over any input for additional context.*
+    *The tool will compare NPV across all three warranty scenarios to help optimize your decision.*
     """)
     st.markdown("---")
 
@@ -114,12 +114,6 @@ with st.sidebar:
         help="More iterations increase accuracy but take longer to compute"
     )
     
-    include_guarantee = st.checkbox(
-        "Include Performance Guarantee",
-        value=True,
-        help="Compare scenarios with and without warranty"
-    )
-    
     st.markdown("---")
     
     run_simulation = st.button(
@@ -133,7 +127,7 @@ with st.sidebar:
     <small style='color: #666;'>
     Computation time: ~{:.1f} seconds
     </small>
-    """.format(num_simulations/1000), unsafe_allow_html=True)
+    """.format(num_simulations/1000 * 3), unsafe_allow_html=True)  # x3 for three scenarios
 
 # Main parameter tabs - cleaner organization
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -144,15 +138,10 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Risk Factors"
 ])
 
-# Initialize default values for all variables to prevent NameError
-# These will be overridden when users interact with the tabs
-warranty_option = "Warranty + Performance Guarantee"
-extended_warranty_y4_15 = 1.5
-extended_warranty_y16_20 = 2.0
-perf_only_y4_10 = 2.0
-perf_only_y11_15 = 2.0
+# Initialize default values
 capacity_payment_rate = 50000
 rte_for_capacity = 86.0
+base_cycles_per_year = 365
 
 with tab1:
     st.markdown("#### Battery System Specifications")
@@ -171,11 +160,11 @@ with tab1:
     with col2:
         power_rating = st.number_input(
             "Power Rating (MW)",
-            value=113.31,
+            value=100.0,
             min_value=50.0,
             max_value=250.0,
             format="%.2f",
-            help="Maximum charge/discharge power"
+            help="Maximum charge/discharge power (fixed, does not degrade)"
         )
         
     with col3:
@@ -359,10 +348,11 @@ with tab4:
     with col1:
         initial_capex = st.number_input(
             "Initial CAPEX ($M)",
-            value=100.0,
-            min_value=50.0,
+            value=55.0,
+            min_value=20.0,
             max_value=500.0,
-            format="%.1f"
+            format="%.1f",
+            help="Total capital expenditure for battery system"
         )
         
         base_warranty_years = st.number_input(
@@ -370,21 +360,49 @@ with tab4:
             value=3,
             min_value=1,
             max_value=5,
-            help="Initial warranty coverage period"
+            help="Initial warranty coverage period (included in CAPEX)"
         )
         
     with col2:
         perf_guarantee_years = st.number_input(
-            "Performance Guarantee (years)",
+            "Initial Performance Guarantee (years)",
             value=3,
             min_value=1,
             max_value=5,
-            help="Initial performance guarantee period"
+            help="Initial performance guarantee period (included in CAPEX)"
         )
     
-    st.markdown("#### Extended Warranty Pricing")
-    st.caption("As specified in Section 3.2 of CATL contract")
+    st.markdown("#### Extended Coverage Options")
+    st.info("Configure pricing for two extension scenarios: Performance Only vs Full Warranty")
     
+    # Performance Guarantee Only Option
+    st.markdown("##### Option 1: Performance Guarantee Only")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        perf_only_y1_7 = st.slider(
+            "Years 1-7 Total Cost (% CAPEX)",
+            min_value=0.5,
+            max_value=5.0,
+            value=2.0,
+            step=0.1,
+            format="%.1f",
+            help="Total cost for years 1-7 (paid over the period)"
+        )
+        
+    with col2:
+        perf_only_y8_12 = st.slider(
+            "Years 8-12 Total Cost (% CAPEX)",
+            min_value=0.5,
+            max_value=5.0,
+            value=2.0,
+            step=0.1,
+            format="%.1f",
+            help="Total cost for years 8-12 (paid over 5 years)"
+        )
+    
+    # Full Warranty + Performance Guarantee Option
+    st.markdown("##### Option 2: Full Warranty + Performance Guarantee")
     col1, col2 = st.columns(2)
     
     with col1:
@@ -394,7 +412,8 @@ with tab4:
             max_value=3.0,
             value=1.5,
             step=0.1,
-            format="%.1f"
+            format="%.1f",
+            help="Annual payment for extended warranty"
         )
         
     with col2:
@@ -404,7 +423,8 @@ with tab4:
             max_value=4.0,
             value=2.0,
             step=0.1,
-            format="%.1f"
+            format="%.1f",
+            help="Annual payment for final years"
         )
 
 with tab5:
@@ -446,7 +466,7 @@ with tab5:
             value=97
         )
 
-# Monte Carlo Simulation Class (unchanged logic, just embedded)
+# Monte Carlo Simulation Class - Modified for three scenarios
 class BESSMonteCarloSimulation:
     def __init__(self, params):
         self.params = params
@@ -529,7 +549,6 @@ class BESSMonteCarloSimulation:
         )
         
         # Capacity payment based on available MWh at point of connection
-        # Formula: (MWh * SOH * RTE) / 4 * payment_rate
         soh = capacity_retention / 100  # State of Health as fraction
         rte_for_capacity = self.params.get('rte_for_capacity', 86.0) / 100
         available_capacity = self.params['initial_capacity'] * soh * rte_for_capacity
@@ -539,44 +558,50 @@ class BESSMonteCarloSimulation:
         
         return energy_revenue + capacity_revenue + ancillary_revenue
     
-    def calculate_opex(self, year, has_warranty):
-        """Calculate operating expenses"""
+    def calculate_opex(self, year, warranty_type):
+        """Calculate operating expenses based on warranty coverage"""
         base_opex = self.params['initial_capex'] * 1e6 * 0.015
         
-        if not has_warranty and year >= self.params['base_warranty_years']:
-            base_opex *= 1.5
+        # Increase opex if no warranty coverage
+        if warranty_type == "no_extension" and year >= self.params['base_warranty_years']:
+            base_opex *= 1.5  # 50% increase in O&M without warranty
+        elif warranty_type == "performance_only" and year >= self.params['base_warranty_years']:
+            base_opex *= 1.25  # 25% increase with performance guarantee only
             
         return base_opex
     
-    def calculate_warranty_cost(self, year):
-        """Calculate warranty cost for given year"""
+    def calculate_warranty_cost(self, year, warranty_type):
+        """Calculate warranty cost for given year and warranty type"""
         if year < self.params['base_warranty_years']:
-            return 0
+            return 0  # Base warranty included in CAPEX
         
-        warranty_option = self.params.get('warranty_option', 'Warranty + Performance Guarantee')
-        
-        if warranty_option == "Performance Guarantee Only":
+        if warranty_type == "no_extension":
+            return 0  # No extended warranty
+            
+        elif warranty_type == "performance_only":
             # Performance guarantee only - total payment spread over period
-            if year >= 3 and year < 10:
-                # Years 4-10: 2% total spread over 7 years
-                perf_only_y4_10 = self.params.get('perf_only_y4_10', 2.0)
-                annual_cost = (self.params['initial_capex'] * 1e6 * (perf_only_y4_10/100)) / 7
+            if year >= self.params['base_warranty_years'] and year < 7:
+                # Spread the cost over years after base warranty to year 7
+                years_in_period = 7 - self.params['base_warranty_years']
+                annual_cost = (self.params['initial_capex'] * 1e6 * (self.params['perf_only_y1_7']/100)) / years_in_period
                 return annual_cost
-            elif year >= 10 and year < 15:
-                # Years 11-15: 2% total spread over 5 years
-                perf_only_y11_15 = self.params.get('perf_only_y11_15', 2.0)
-                annual_cost = (self.params['initial_capex'] * 1e6 * (perf_only_y11_15/100)) / 5
+            elif year >= 7 and year < 12:
+                # Years 8-12: spread over 5 years
+                annual_cost = (self.params['initial_capex'] * 1e6 * (self.params['perf_only_y8_12']/100)) / 5
                 return annual_cost
             else:
                 return 0
-        else:
-            # Warranty + Performance Guarantee - annual payments
+                
+        elif warranty_type == "full_warranty":
+            # Full warranty + performance guarantee - annual payments
             if year < 15:
                 return self.params['initial_capex'] * 1e6 * (self.params['extended_warranty_y4_15']/100)
             else:
                 return self.params['initial_capex'] * 1e6 * (self.params['extended_warranty_y16_20']/100)
+        
+        return 0
     
-    def simulate_single_scenario(self, with_guarantee=True):
+    def simulate_single_scenario(self, warranty_type="full_warranty"):
         """Run single simulation scenario"""
         cash_flows = []
         capacity_path = self.calculate_degradation_path(self.params['degradation_scenario'])
@@ -584,14 +609,19 @@ class BESSMonteCarloSimulation:
         for year in range(self.params['project_lifetime']):
             actual_cycles = self.params['base_cycles_per_year'] * np.random.uniform(0.9, 1.1)
             
+            # Simulate random failures
             has_failure = np.random.random() < (self.params['module_failure_rate']/100)
             if has_failure:
                 downtime_factor = 1 - (self.params['avg_repair_time']/365)
                 actual_cycles *= downtime_factor
+                
+                # Without warranty, failures have more impact
+                if warranty_type == "no_extension" and year >= self.params['base_warranty_years']:
+                    downtime_factor *= 0.8  # Additional 20% impact without warranty
             
             revenue = self.calculate_revenue(year, capacity_path[year], actual_cycles)
-            opex = self.calculate_opex(year, with_guarantee)
-            warranty_cost = self.calculate_warranty_cost(year) if with_guarantee else 0
+            opex = self.calculate_opex(year, warranty_type)
+            warranty_cost = self.calculate_warranty_cost(year, warranty_type)
             
             net_cf = revenue - opex - warranty_cost
             cash_flows.append(net_cf)
@@ -604,21 +634,30 @@ class BESSMonteCarloSimulation:
         return np.sum(cash_flows * discount_factors)
     
     def run_simulation(self, num_simulations=1000):
-        """Run full Monte Carlo simulation"""
-        npv_with_guarantee = []
-        npv_without_guarantee = []
+        """Run full Monte Carlo simulation for all three scenarios"""
+        npv_no_extension = []
+        npv_performance_only = []
+        npv_full_warranty = []
         
         for _ in range(num_simulations):
-            cf_with = self.simulate_single_scenario(with_guarantee=True)
-            npv_with_guarantee.append(self.calculate_npv(cf_with))
+            # Scenario 1: No extension
+            cf_no_ext = self.simulate_single_scenario(warranty_type="no_extension")
+            npv_no_extension.append(self.calculate_npv(cf_no_ext))
             
-            cf_without = self.simulate_single_scenario(with_guarantee=False)
-            npv_without_guarantee.append(self.calculate_npv(cf_without))
+            # Scenario 2: Performance guarantee only
+            cf_perf_only = self.simulate_single_scenario(warranty_type="performance_only")
+            npv_performance_only.append(self.calculate_npv(cf_perf_only))
+            
+            # Scenario 3: Full warranty + performance guarantee
+            cf_full = self.simulate_single_scenario(warranty_type="full_warranty")
+            npv_full_warranty.append(self.calculate_npv(cf_full))
         
         self.results = {
-            'npv_with_guarantee': np.array(npv_with_guarantee),
-            'npv_without_guarantee': np.array(npv_without_guarantee),
-            'guarantee_value': np.array(npv_with_guarantee) - np.array(npv_without_guarantee)
+            'npv_no_extension': np.array(npv_no_extension),
+            'npv_performance_only': np.array(npv_performance_only),
+            'npv_full_warranty': np.array(npv_full_warranty),
+            'perf_only_value': np.array(npv_performance_only) - np.array(npv_no_extension),
+            'full_warranty_value': np.array(npv_full_warranty) - np.array(npv_no_extension)
         }
         
         return self.results
@@ -644,8 +683,8 @@ if run_simulation:
         'avg_price_spread': avg_price_spread,
         'price_volatility': price_volatility,
         'price_growth_rate': price_growth_rate,
-        'capacity_payment_rate': capacity_payment_rate,  # Changed from capacity_payment
-        'rte_for_capacity': rte_for_capacity,  # Added for capacity calculation
+        'capacity_payment_rate': capacity_payment_rate,
+        'rte_for_capacity': rte_for_capacity,
         'ancillary_revenue': ancillary_revenue,
         'degradation_scenario': degradation_scenario,
         'annual_degradation': annual_degradation,
@@ -653,24 +692,17 @@ if run_simulation:
         'initial_capex': initial_capex,
         'base_warranty_years': base_warranty_years,
         'perf_guarantee_years': perf_guarantee_years,
-        'warranty_option': warranty_option,  # Added warranty option type
+        'perf_only_y1_7': perf_only_y1_7,
+        'perf_only_y8_12': perf_only_y8_12,
+        'extended_warranty_y4_15': extended_warranty_y4_15,
+        'extended_warranty_y16_20': extended_warranty_y16_20,
         'module_failure_rate': module_failure_rate,
         'serial_defect_prob': serial_defect_prob,
         'avg_repair_time': avg_repair_time,
         'augmentation_threshold': augmentation_threshold
     }
     
-    # Add appropriate warranty parameters based on option
-    if warranty_option == "Performance Guarantee Only":
-        sim_params['perf_only_y4_10'] = perf_only_y4_10
-        sim_params['perf_only_y11_15'] = perf_only_y11_15
-        sim_params['extended_warranty_y4_15'] = 0
-        sim_params['extended_warranty_y16_20'] = 0
-    else:
-        sim_params['extended_warranty_y4_15'] = extended_warranty_y4_15
-        sim_params['extended_warranty_y16_20'] = extended_warranty_y16_20
-    
-    progress_text.text(f'Running {num_simulations:,} Monte Carlo iterations...')
+    progress_text.text(f'Running {num_simulations:,} Monte Carlo iterations for three scenarios...')
     progress_bar.progress(50)
     
     # Run simulation
@@ -686,281 +718,299 @@ if run_simulation:
     
     # Display results
     st.markdown("---")
-    st.markdown("## Analysis Results")
+    st.markdown("## Three-Scenario Comparison Results")
     
-    # Add warranty option to title
-    if warranty_option == "Performance Guarantee Only":
-        st.caption("Analyzing: Performance Guarantee Only (no warranty coverage)")
-    else:
-        st.caption("Analyzing: Full Warranty + Performance Guarantee")
+    # Key metrics comparison
+    st.markdown("### NPV Summary Statistics")
     
-    # Key metrics - clean card layout
-    mean_value = np.mean(results['guarantee_value']) / 1e6
-    prob_positive = np.sum(results['guarantee_value'] > 0) / len(results['guarantee_value']) * 100
-    var_95 = np.percentile(results['guarantee_value'], 5) / 1e6
-    
-    # Calculate ROI based on warranty option
-    if warranty_option == "Performance Guarantee Only":
-        total_warranty_cost = initial_capex * (perf_only_y4_10/100)
-        if project_lifetime > 10:
-            total_warranty_cost += initial_capex * (perf_only_y11_15/100)
-        roi = (mean_value / total_warranty_cost) * 100 if total_warranty_cost > 0 else 0
-    else:
-        total_warranty_cost = initial_capex * (extended_warranty_y4_15/100) * min(12, project_lifetime - 3)
-        if project_lifetime > 15:
-            total_warranty_cost += initial_capex * (extended_warranty_y16_20/100) * (project_lifetime - 15)
-        roi = (mean_value / total_warranty_cost) * 100 if total_warranty_cost > 0 else 0
-    
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        metric_label = "Expected Value Impact"
-        if mean_value >= 0:
-            st.metric(metric_label, f"+${mean_value:.2f}M")
-        else:
-            st.metric(metric_label, f"-${abs(mean_value):.2f}M")
-    
+        st.markdown("#### 🔷 No Extension")
+        mean_no_ext = np.mean(results['npv_no_extension']) / 1e6
+        std_no_ext = np.std(results['npv_no_extension']) / 1e6
+        st.metric("Expected NPV", f"${mean_no_ext:.2f}M")
+        st.caption(f"Std Dev: ${std_no_ext:.2f}M")
+        
     with col2:
-        st.metric("Probability of Net Benefit", f"{prob_positive:.1f}%")
-    
+        st.markdown("#### 🔶 Performance Only")
+        mean_perf_only = np.mean(results['npv_performance_only']) / 1e6
+        std_perf_only = np.std(results['npv_performance_only']) / 1e6
+        value_vs_no_ext = mean_perf_only - mean_no_ext
+        st.metric("Expected NPV", f"${mean_perf_only:.2f}M", f"${value_vs_no_ext:+.2f}M")
+        st.caption(f"Std Dev: ${std_perf_only:.2f}M")
+        
     with col3:
-        st.metric("Value at Risk (95% CI)", f"${var_95:.2f}M")
+        st.markdown("#### 🟣 Full Warranty")
+        mean_full = np.mean(results['npv_full_warranty']) / 1e6
+        std_full = np.std(results['npv_full_warranty']) / 1e6
+        value_vs_no_ext_full = mean_full - mean_no_ext
+        st.metric("Expected NPV", f"${mean_full:.2f}M", f"${value_vs_no_ext_full:+.2f}M")
+        st.caption(f"Std Dev: ${std_full:.2f}M")
     
-    with col4:
-        st.metric("Return on Warranty", f"{roi:.1f}%")
+    # Visualization - NPV Distribution Comparison
+    st.markdown("### NPV Distribution Analysis")
     
-    # Visualization with clean styling
-    st.markdown("### Distribution Analysis")
+    # Create combined histogram
+    fig_combined = go.Figure()
     
+    # Add traces for each scenario
+    fig_combined.add_trace(go.Histogram(
+        x=results['npv_no_extension']/1e6,
+        name='No Extension',
+        marker_color='#1E88E5',  # Blue
+        opacity=0.6,
+        nbinsx=30
+    ))
+    
+    fig_combined.add_trace(go.Histogram(
+        x=results['npv_performance_only']/1e6,
+        name='Performance Only',
+        marker_color='#FB8C00',  # Orange
+        opacity=0.6,
+        nbinsx=30
+    ))
+    
+    fig_combined.add_trace(go.Histogram(
+        x=results['npv_full_warranty']/1e6,
+        name='Full Warranty',
+        marker_color='#7B1FA2',  # Purple
+        opacity=0.6,
+        nbinsx=30
+    ))
+    
+    # Add vertical lines for means
+    fig_combined.add_vline(x=mean_no_ext, line_dash="dash", line_color="#1E88E5", 
+                          annotation_text=f"No Ext: ${mean_no_ext:.1f}M", annotation_position="top")
+    fig_combined.add_vline(x=mean_perf_only, line_dash="dash", line_color="#FB8C00",
+                          annotation_text=f"Perf: ${mean_perf_only:.1f}M", annotation_position="bottom")
+    fig_combined.add_vline(x=mean_full, line_dash="dash", line_color="#7B1FA2",
+                          annotation_text=f"Full: ${mean_full:.1f}M", annotation_position="top")
+    
+    fig_combined.update_layout(
+        title='NPV Distribution - Three Scenario Comparison',
+        xaxis_title='NPV ($M)',
+        yaxis_title='Frequency',
+        barmode='overlay',
+        height=400,
+        showlegend=True,
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(size=12),
+        title_font_size=14,
+        hovermode='x unified'
+    )
+    fig_combined.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
+    fig_combined.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
+    
+    st.plotly_chart(fig_combined, use_container_width=True)
+    
+    # Value comparison charts
     col1, col2 = st.columns(2)
     
     with col1:
-        # NPV Distribution - higher contrast colors
-        fig1 = go.Figure()
-        fig1.add_trace(go.Histogram(
-            x=results['npv_with_guarantee']/1e6,
-            name='With Guarantee',
-            marker_color='#2E7D32',  # Dark green for with guarantee
+        # Incremental value chart
+        fig_value = go.Figure()
+        fig_value.add_trace(go.Histogram(
+            x=results['perf_only_value']/1e6,
+            name='Performance Only vs No Extension',
+            marker_color='#FB8C00',  # Orange
             opacity=0.75
         ))
-        fig1.add_trace(go.Histogram(
-            x=results['npv_without_guarantee']/1e6,
-            name='Without Guarantee',
-            marker_color='#C62828',  # Dark red for without guarantee
+        fig_value.add_trace(go.Histogram(
+            x=results['full_warranty_value']/1e6,
+            name='Full Warranty vs No Extension',
+            marker_color='#7B1FA2',  # Purple
             opacity=0.75
         ))
-        fig1.update_layout(
-            title='NPV Distribution Comparison',
-            xaxis_title='NPV ($M)',
-            yaxis_title='Frequency',
-            barmode='overlay',
-            height=350,
-            showlegend=True,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(size=12),
-            title_font_size=14,
-            hovermode='x unified'
-        )
-        fig1.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
-        fig1.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
-        st.plotly_chart(fig1, use_container_width=True)
-    
-    with col2:
-        # Guarantee Value Distribution - clean design
-        fig2 = go.Figure()
-        fig2.add_trace(go.Histogram(
-            x=results['guarantee_value']/1e6,
-            name='Guarantee Value',
-            marker_color='#000'
-        ))
-        fig2.add_vline(
+        fig_value.add_vline(
             x=0,
             line_dash="dash",
             line_color="#ff0000",
             annotation_text="Break-even",
             annotation_position="top"
         )
-        fig2.update_layout(
-            title='Performance Guarantee Value Distribution',
-            xaxis_title='Value ($M)',
+        fig_value.update_layout(
+            title='Incremental Value Distribution',
+            xaxis_title='Additional Value ($M)',
             yaxis_title='Frequency',
+            height=350,
+            showlegend=True,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font=dict(size=12),
+            barmode='overlay'
+        )
+        st.plotly_chart(fig_value, use_container_width=True)
+        
+    with col2:
+        # Box plot comparison
+        fig_box = go.Figure()
+        fig_box.add_trace(go.Box(
+            y=results['npv_no_extension']/1e6,
+            name='No Extension',
+            marker_color='#1E88E5'  # Blue
+        ))
+        fig_box.add_trace(go.Box(
+            y=results['npv_performance_only']/1e6,
+            name='Performance Only',
+            marker_color='#FB8C00'  # Orange
+        ))
+        fig_box.add_trace(go.Box(
+            y=results['npv_full_warranty']/1e6,
+            name='Full Warranty',
+            marker_color='#7B1FA2'  # Purple
+        ))
+        fig_box.update_layout(
+            title='NPV Range Comparison',
+            yaxis_title='NPV ($M)',
             height=350,
             showlegend=False,
             plot_bgcolor='white',
             paper_bgcolor='white',
-            font=dict(size=12),
-            title_font_size=14
+            font=dict(size=12)
         )
-        fig2.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
-        fig2.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#f0f0f0')
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig_box, use_container_width=True)
     
-    # Financial Analysis
-    st.markdown("---")
-    st.markdown("### Financial Analysis & Risk Assessment")
+    # Detailed metrics table
+    st.markdown("### Detailed Statistical Analysis")
+    
+    # Calculate all statistics
+    percentiles = [5, 25, 50, 75, 95]
+    
+    stats_data = {
+        'Metric': ['Mean NPV', 'Std Deviation', 'Min', 'Max'] + [f'{p}th Percentile' for p in percentiles],
+        'No Extension': [
+            np.mean(results['npv_no_extension'])/1e6,
+            np.std(results['npv_no_extension'])/1e6,
+            np.min(results['npv_no_extension'])/1e6,
+            np.max(results['npv_no_extension'])/1e6
+        ] + [np.percentile(results['npv_no_extension'], p)/1e6 for p in percentiles],
+        'Performance Only': [
+            np.mean(results['npv_performance_only'])/1e6,
+            np.std(results['npv_performance_only'])/1e6,
+            np.min(results['npv_performance_only'])/1e6,
+            np.max(results['npv_performance_only'])/1e6
+        ] + [np.percentile(results['npv_performance_only'], p)/1e6 for p in percentiles],
+        'Full Warranty': [
+            np.mean(results['npv_full_warranty'])/1e6,
+            np.std(results['npv_full_warranty'])/1e6,
+            np.min(results['npv_full_warranty'])/1e6,
+            np.max(results['npv_full_warranty'])/1e6
+        ] + [np.percentile(results['npv_full_warranty'], p)/1e6 for p in percentiles]
+    }
+    
+    stats_df = pd.DataFrame(stats_data)
+    
+    # Add formatting
+    for col in ['No Extension', 'Performance Only', 'Full Warranty']:
+        stats_df[col] = stats_df[col].apply(lambda x: f'${x:.2f}M')
+    
+    st.dataframe(stats_df, use_container_width=True, hide_index=True)
+    
+    # Probability analysis
+    st.markdown("### Risk Analysis")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    # Calculate probabilities
+    prob_perf_beats_none = np.sum(results['perf_only_value'] > 0) / len(results['perf_only_value']) * 100
+    prob_full_beats_none = np.sum(results['full_warranty_value'] > 0) / len(results['full_warranty_value']) * 100
+    prob_full_beats_perf = np.sum(results['npv_full_warranty'] > results['npv_performance_only']) / len(results['npv_full_warranty']) * 100
+    
+    with col1:
+        st.metric("P(Perf > No Ext)", f"{prob_perf_beats_none:.1f}%")
+        st.caption("Probability that Performance Only beats No Extension")
+        
+    with col2:
+        st.metric("P(Full > No Ext)", f"{prob_full_beats_none:.1f}%")
+        st.caption("Probability that Full Warranty beats No Extension")
+        
+    with col3:
+        st.metric("P(Full > Perf)", f"{prob_full_beats_perf:.1f}%")
+        st.caption("Probability that Full Warranty beats Performance Only")
+    
+    # Cost-benefit analysis
+    st.markdown("### Cost-Benefit Analysis")
+    
+    # Calculate warranty costs
+    perf_only_cost = initial_capex * (perf_only_y1_7/100)
+    if project_lifetime > 7:
+        perf_only_cost += initial_capex * (perf_only_y8_12/100)
+    
+    full_warranty_cost = initial_capex * (extended_warranty_y4_15/100) * min(12, project_lifetime - base_warranty_years)
+    if project_lifetime > 15:
+        full_warranty_cost += initial_capex * (extended_warranty_y16_20/100) * (project_lifetime - 15)
     
     col1, col2 = st.columns(2)
     
     with col1:
-        if mean_value > 0:
-            st.success(f"""
-            **Economic Assessment: Net Positive Expected Value**
-            
-            The performance guarantee demonstrates a positive expected net present value of ${mean_value:.2f}M 
-            over the project lifetime. This indicates that the risk mitigation benefits statistically 
-            outweigh the warranty premium costs under the modeled scenarios.
-            """)
-        else:
-            st.info(f"""
-            **Economic Assessment: Negative Expected Value**
-            
-            The analysis indicates a negative expected net present value of ${abs(mean_value):.2f}M 
-            for the performance guarantee. This suggests the warranty premium exceeds the risk-adjusted 
-            value of the protection provided under current market conditions and degradation assumptions.
-            """)
-    
+        st.markdown("#### Performance Only")
+        st.write(f"Total Warranty Cost: ${perf_only_cost:.2f}M")
+        st.write(f"Expected Benefit: ${value_vs_no_ext:.2f}M")
+        roi_perf = (value_vs_no_ext / perf_only_cost * 100) if perf_only_cost > 0 else 0
+        st.write(f"**ROI: {roi_perf:.1f}%**")
+        
     with col2:
-        if prob_positive > 70:
-            st.success(f"""
-            **Risk Profile: Low Uncertainty**
-            
-            With {prob_positive:.1f}% of simulated scenarios yielding positive returns, 
-            the analysis demonstrates robust statistical confidence in the value proposition.
-            """)
-        elif prob_positive > 50:
-            st.warning(f"""
-            **Risk Profile: Moderate Uncertainty**
-            
-            The simulation shows {prob_positive:.1f}% probability of net benefit, indicating 
-            moderate variance in outcomes.
-            """)
-        else:
-            st.info(f"""
-            **Risk Profile: Unfavorable Risk-Return**
-            
-            Only {prob_positive:.1f}% of scenarios generate positive returns, suggesting 
-            the guarantee pricing structure is misaligned with the actual risk profile.
-            """)
+        st.markdown("#### Full Warranty")
+        st.write(f"Total Warranty Cost: ${full_warranty_cost:.2f}M")
+        st.write(f"Expected Benefit: ${value_vs_no_ext_full:.2f}M")
+        roi_full = (value_vs_no_ext_full / full_warranty_cost * 100) if full_warranty_cost > 0 else 0
+        st.write(f"**ROI: {roi_full:.1f}%**")
     
-    # Recommendations
+    # Strategic recommendation
     st.markdown("---")
-    st.markdown("### Strategic Recommendations")
+    st.markdown("### Strategic Recommendation")
     
-    # Calculate additional metrics
-    if warranty_option == "Performance Guarantee Only":
-        # Calculate total cost for performance guarantee only
-        warranty_total_cost = initial_capex * 1e6 * (perf_only_y4_10/100)  # Years 4-10 total
-        if project_lifetime > 10:
-            warranty_total_cost += initial_capex * 1e6 * (perf_only_y11_15/100)  # Years 11-15 total
+    # Determine best option
+    if mean_full > mean_perf_only and mean_full > mean_no_ext and prob_full_beats_none > 60:
+        recommendation = "Full Warranty + Performance Guarantee"
+        rationale = f"""
+        **Recommendation: FULL WARRANTY + PERFORMANCE GUARANTEE**
+        
+        The comprehensive coverage provides the highest expected NPV of ${mean_full:.2f}M, 
+        delivering ${value_vs_no_ext_full:.2f}M in additional value over self-insurance.
+        
+        - Probability of positive return: {prob_full_beats_none:.1f}%
+        - ROI on warranty investment: {roi_full:.1f}%
+        - Risk mitigation: Maximum coverage for both equipment failures and performance degradation
+        """
+        st.info(rationale)
+    elif mean_perf_only > mean_no_ext and prob_perf_beats_none > 60:
+        recommendation = "Performance Guarantee Only"
+        rationale = f"""
+        **Recommendation: PERFORMANCE GUARANTEE ONLY**
+        
+        The performance-only option provides optimal value with expected NPV of ${mean_perf_only:.2f}M,
+        adding ${value_vs_no_ext:.2f}M over self-insurance at lower cost than full warranty.
+        
+        - Probability of positive return: {prob_perf_beats_none:.1f}%
+        - ROI on warranty investment: {roi_perf:.1f}%
+        - Cost efficiency: ${full_warranty_cost - perf_only_cost:.2f}M savings vs full warranty
+        """
+        st.info(rationale)
     else:
-        # Calculate annual payments for warranty + performance guarantee
-        warranty_total_cost = initial_capex * 1e6 * (extended_warranty_y4_15/100) * min(12, project_lifetime)
-        if project_lifetime > 15:
-            warranty_total_cost += initial_capex * 1e6 * (extended_warranty_y16_20/100) * (project_lifetime - 15)
+        recommendation = "No Extension (Self-Insure)"
+        rationale = f"""
+        **Recommendation: NO EXTENSION (SELF-INSURE)**
+        
+        Self-insurance provides the highest expected NPV of ${mean_no_ext:.2f}M.
+        The warranty options do not provide sufficient value to justify their costs.
+        
+        - Potential savings: ${min(perf_only_cost, full_warranty_cost):.2f}M - ${max(perf_only_cost, full_warranty_cost):.2f}M
+        - Establish internal reserve fund: ${perf_only_cost * 0.4:.2f}M recommended
+        - Focus on preventive maintenance and monitoring systems
+        """
+        st.info(rationale)
     
-    breakeven_degradation = annual_degradation * (1 + warranty_total_cost / (initial_capex * 1e6))
-    irr_threshold = discount_rate + 2.0
-    
-    if mean_value > 0 and prob_positive > 60:
-        st.markdown(f"""
-        **Recommendation: PROCEED WITH GUARANTEE**
-        
-        **Quantitative Justification:**
-        - Expected NPV improvement: ${mean_value:.2f}M
-        - Statistical confidence level: {prob_positive:.1f}%
-        - Risk-adjusted return exceeds hurdle rate of {irr_threshold:.1f}%
-        - Total warranty investment: ${warranty_total_cost/1e6:.2f}M over project lifetime
-        
-        **Strategic Considerations:**
-        - The guarantee provides asymmetric risk protection favorable to project economics
-        - Warranty terms align with expected degradation curves
-        - Consider negotiating multi-year payment terms to improve cash flow timing
-        """)
-    elif mean_value > 0 and prob_positive <= 60:
-        st.markdown(f"""
-        **Recommendation: NEGOTIATE TERMS**
-        
-        **Quantitative Findings:**
-        - Marginal expected NPV: ${mean_value:.2f}M
-        - Scenario confidence: {prob_positive:.1f}% (below 60% threshold)
-        - Breakeven requires degradation >{breakeven_degradation:.1f}% annually
-        
-        **Negotiation Priorities:**
-        1. Reduce annual warranty premiums by 20-30%
-        2. Implement performance-based pricing tied to actual degradation
-        3. Include availability guarantees (currently {availability_target}% target)
-        4. Negotiate cap on total warranty payments at ${warranty_total_cost*0.75/1e6:.2f}M
-        """)
-    else:
-        st.markdown(f"""
-        **Recommendation: SELF-INSURE**
-        
-        **Financial Analysis:**
-        - Expected NPV impact: -${abs(mean_value):.2f}M
-        - Implied risk premium: {abs(roi):.1f}% above actuarial value
-        - Self-insurance reserve requirement: ${warranty_total_cost*0.4/1e6:.2f}M
-        
-        **Alternative Risk Management Strategy:**
-        1. Establish dedicated O&M reserve fund at 40% of warranty cost
-        2. Implement enhanced monitoring systems for early degradation detection
-        3. Negotiate spot maintenance contracts as needed
-        4. Consider partial coverage for years 10-15 only at reduced rates
-        """)
-    
-    # Statistical summary - clean table
+    # Sensitivity note
     st.markdown("---")
-    st.markdown("### Statistical Summary")
-    
-    summary_data = {
-        'Metric': [
-            'Mean NPV',
-            'Standard Deviation',
-            '5th Percentile',
-            '25th Percentile',
-            'Median',
-            '75th Percentile',
-            '95th Percentile'
-        ],
-        'With Guarantee ($M)': [
-            np.mean(results['npv_with_guarantee'])/1e6,
-            np.std(results['npv_with_guarantee'])/1e6,
-            np.percentile(results['npv_with_guarantee'], 5)/1e6,
-            np.percentile(results['npv_with_guarantee'], 25)/1e6,
-            np.median(results['npv_with_guarantee'])/1e6,
-            np.percentile(results['npv_with_guarantee'], 75)/1e6,
-            np.percentile(results['npv_with_guarantee'], 95)/1e6
-        ],
-        'Without Guarantee ($M)': [
-            np.mean(results['npv_without_guarantee'])/1e6,
-            np.std(results['npv_without_guarantee'])/1e6,
-            np.percentile(results['npv_without_guarantee'], 5)/1e6,
-            np.percentile(results['npv_without_guarantee'], 25)/1e6,
-            np.median(results['npv_without_guarantee'])/1e6,
-            np.percentile(results['npv_without_guarantee'], 75)/1e6,
-            np.percentile(results['npv_without_guarantee'], 95)/1e6
-        ],
-        'Difference ($M)': [
-            np.mean(results['guarantee_value'])/1e6,
-            np.std(results['guarantee_value'])/1e6,
-            np.percentile(results['guarantee_value'], 5)/1e6,
-            np.percentile(results['guarantee_value'], 25)/1e6,
-            np.median(results['guarantee_value'])/1e6,
-            np.percentile(results['guarantee_value'], 75)/1e6,
-            np.percentile(results['guarantee_value'], 95)/1e6
-        ]
-    }
-    
-    summary_df = pd.DataFrame(summary_data)
-    summary_df = summary_df.round(2)
-    
-    # Display with clean styling
-    st.dataframe(
-        summary_df,
-        use_container_width=True,
-        hide_index=True
-    )
+    st.caption("""
+    **Note:** Results are based on Monte Carlo simulation with stochastic modeling of degradation, 
+    market prices, and failure events. Recommendations should be validated against specific contract 
+    terms and risk tolerance. Consider running sensitivity analysis on key parameters.
+    """)
 
-# Footer with minimal information
+# Footer
 st.markdown("---")
-st.caption("Monte Carlo simulation for battery energy storage system warranty valuation")
+st.caption("Monte Carlo simulation for battery energy storage system warranty valuation - Three scenario comparison")
