@@ -8,7 +8,7 @@ import time
 
 # Set page config with minimalist theme
 st.set_page_config(
-    page_title="Performance Guarantee Analysis", 
+    page_title="CATL Performance Guarantee Analysis", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -144,6 +144,16 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Risk Factors"
 ])
 
+# Initialize default values for all variables to prevent NameError
+# These will be overridden when users interact with the tabs
+warranty_option = "Warranty + Performance Guarantee"
+extended_warranty_y4_15 = 1.5
+extended_warranty_y16_20 = 2.0
+perf_only_y4_10 = 2.0
+perf_only_y11_15 = 2.0
+capacity_payment_rate = 50000
+rte_for_capacity = 86.0
+
 with tab1:
     st.markdown("#### Battery System Specifications")
     col1, col2, col3 = st.columns(3)
@@ -155,7 +165,7 @@ with tab1:
             min_value=100.0,
             max_value=500.0,
             format="%.2f",
-            help="Nameplate energy capacity from contract"
+            help="Nameplate energy capacity"
         )
         
     with col2:
@@ -175,7 +185,7 @@ with tab1:
             max_value=98.0,
             value=96.5,
             format="%.1f",
-            help="DC-AC efficiency as specified in contract"
+            help="DC-AC efficiency"
         )
     
     st.markdown("#### Operating Profile")
@@ -209,9 +219,9 @@ with tab1:
         base_cycles_per_year = cycles_per_day * 365
         st.caption(f"→ {base_cycles_per_year:.0f} cycles/year")
         
-        # Add note about CATL contract reference
+        # Add note about typical assumptions
         if abs(cycles_per_day - 1.0) > 0.1:
-            st.caption("⚠️ Contract assumes 365 cycles/year (1.0/day)")
+            st.caption("⚠️ Typical assumption: 365 cycles/year (1.0/day)")
         
     with col2:
         project_lifetime = st.slider(
@@ -267,13 +277,20 @@ with tab2:
     col1, col2 = st.columns(2)
     
     with col1:
-        capacity_payment = st.number_input(
-            "Capacity Payment ($/MW/year)",
+        st.markdown("**Capacity Payment**")
+        st.caption("Based on available MWh/4 at point of connection")
+        
+        # Display the calculation formula
+        st.latex(r"\text{Payment} = \frac{\text{MWh} \times \text{SOH} \times \text{RTE}}{4} \times \text{\$/MWh/year}")
+        
+        capacity_payment_rate = st.number_input(
+            "Capacity Payment Rate ($/MWh/year)",
             value=50000,
             min_value=0,
             max_value=200000,
             step=5000,
-            format="%d"
+            format="%d",
+            help="Payment per MWh of available capacity divided by 4"
         )
         
     with col2:
@@ -284,6 +301,16 @@ with tab2:
             max_value=20.0,
             format="%.1f"
         )
+        
+        # RTE for capacity payment calculation
+        rte_for_capacity = st.number_input(
+            "RTE for Capacity Payment (%)",
+            value=86.0,
+            min_value=80.0,
+            max_value=95.0,
+            format="%.1f",
+            help="Round-trip efficiency at point of connection (typically 86%)"
+        )
 
 with tab3:
     st.markdown("#### Degradation Modeling")
@@ -293,7 +320,7 @@ with tab3:
         degradation_scenario = st.selectbox(
             "Degradation Scenario",
             ["Guaranteed (Contract)", "Optimistic (-20%)", "Pessimistic (+20%)", "Custom"],
-            help="Based on warranty tables"
+            help="Based on CATL warranty tables"
         )
         
         if degradation_scenario == "Custom":
@@ -343,7 +370,7 @@ with tab4:
             value=3,
             min_value=1,
             max_value=5,
-            help="Per Section 2.1 of contract"
+            help="Initial warranty coverage period"
         )
         
     with col2:
@@ -352,11 +379,11 @@ with tab4:
             value=3,
             min_value=1,
             max_value=5,
-            help="Per Section 2.2 of contract"
+            help="Initial performance guarantee period"
         )
     
     st.markdown("#### Extended Warranty Pricing")
-    st.caption("As specified in contract")
+    st.caption("As specified in Section 3.2 of CATL contract")
     
     col1, col2 = st.columns(2)
     
@@ -401,7 +428,7 @@ with tab5:
             value=2.0,
             step=0.1,
             format="%.1f",
-            help="Per Section 2.5: >5% modules affected"
+            help=">5% modules affected triggers serial defect classification"
         )
         
     with col2:
@@ -439,8 +466,8 @@ class BESSMonteCarloSimulation:
             # Lower cycling reduces degradation
             cycle_stress_factor = 0.9 + cycles_per_day * 0.1
         
-        if scenario_type == "Guaranteed (Contract)":
-            # Use contract values for first 3 years, adjusted for cycling
+        if scenario_type == "Guaranteed":
+            # Use typical warranty values for first 3 years, adjusted for cycling
             guaranteed_values = [100, 94.40, 91.11, 88.97]
             
             # Adjust guaranteed values based on cycling pattern if different from contract assumption
@@ -479,21 +506,16 @@ class BESSMonteCarloSimulation:
         base_spread = self.params['avg_price_spread'] * (1 + self.params['price_growth_rate']/100)**year
         
         # Adjust price spread based on cycling pattern
-        # More cycles per day might mean capturing less optimal spreads
         cycles_per_day = self.params.get('cycles_per_day', 1.0)
         if cycles_per_day <= 1.0:
-            # Single cycle captures best daily spread
             spread_efficiency = 1.0
         elif cycles_per_day <= 1.5:
-            # 1.5 cycles: one optimal, one sub-optimal
             spread_efficiency = 0.90
         elif cycles_per_day <= 2.0:
-            # 2 cycles: morning and evening peaks
             spread_efficiency = 0.85
         else:
-            # More than 2 cycles: diminishing returns
             spread_efficiency = 0.85 - (cycles_per_day - 2.0) * 0.05
-            spread_efficiency = max(spread_efficiency, 0.70)  # Floor at 70%
+            spread_efficiency = max(spread_efficiency, 0.70)
         
         # Apply volatility and efficiency adjustment
         price_spread = base_spread * spread_efficiency
@@ -506,7 +528,13 @@ class BESSMonteCarloSimulation:
             (self.params['roundtrip_efficiency']/100)
         )
         
-        capacity_revenue = self.params['power_rating'] * self.params['capacity_payment']
+        # Capacity payment based on available MWh at point of connection
+        # Formula: (MWh * SOH * RTE) / 4 * payment_rate
+        soh = capacity_retention / 100  # State of Health as fraction
+        rte_for_capacity = self.params.get('rte_for_capacity', 86.0) / 100
+        available_capacity = self.params['initial_capacity'] * soh * rte_for_capacity
+        capacity_revenue = (available_capacity / 4) * self.params['capacity_payment_rate']
+        
         ancillary_revenue = effective_capacity * cycles * self.params['ancillary_revenue']
         
         return energy_revenue + capacity_revenue + ancillary_revenue
@@ -524,10 +552,29 @@ class BESSMonteCarloSimulation:
         """Calculate warranty cost for given year"""
         if year < self.params['base_warranty_years']:
             return 0
-        elif year < 15:
-            return self.params['initial_capex'] * 1e6 * (self.params['extended_warranty_y4_15']/100)
+        
+        warranty_option = self.params.get('warranty_option', 'Warranty + Performance Guarantee')
+        
+        if warranty_option == "Performance Guarantee Only":
+            # Performance guarantee only - total payment spread over period
+            if year >= 3 and year < 10:
+                # Years 4-10: 2% total spread over 7 years
+                perf_only_y4_10 = self.params.get('perf_only_y4_10', 2.0)
+                annual_cost = (self.params['initial_capex'] * 1e6 * (perf_only_y4_10/100)) / 7
+                return annual_cost
+            elif year >= 10 and year < 15:
+                # Years 11-15: 2% total spread over 5 years
+                perf_only_y11_15 = self.params.get('perf_only_y11_15', 2.0)
+                annual_cost = (self.params['initial_capex'] * 1e6 * (perf_only_y11_15/100)) / 5
+                return annual_cost
+            else:
+                return 0
         else:
-            return self.params['initial_capex'] * 1e6 * (self.params['extended_warranty_y16_20']/100)
+            # Warranty + Performance Guarantee - annual payments
+            if year < 15:
+                return self.params['initial_capex'] * 1e6 * (self.params['extended_warranty_y4_15']/100)
+            else:
+                return self.params['initial_capex'] * 1e6 * (self.params['extended_warranty_y16_20']/100)
     
     def simulate_single_scenario(self, with_guarantee=True):
         """Run single simulation scenario"""
@@ -591,13 +638,14 @@ if run_simulation:
         'power_rating': power_rating,
         'roundtrip_efficiency': roundtrip_efficiency,
         'base_cycles_per_year': base_cycles_per_year,
-        'cycles_per_day': cycles_per_day,  # Add cycles per day to params
+        'cycles_per_day': cycles_per_day,
         'project_lifetime': project_lifetime,
         'discount_rate': discount_rate,
         'avg_price_spread': avg_price_spread,
         'price_volatility': price_volatility,
         'price_growth_rate': price_growth_rate,
-        'capacity_payment': capacity_payment,
+        'capacity_payment_rate': capacity_payment_rate,  # Changed from capacity_payment
+        'rte_for_capacity': rte_for_capacity,  # Added for capacity calculation
         'ancillary_revenue': ancillary_revenue,
         'degradation_scenario': degradation_scenario,
         'annual_degradation': annual_degradation,
@@ -605,13 +653,22 @@ if run_simulation:
         'initial_capex': initial_capex,
         'base_warranty_years': base_warranty_years,
         'perf_guarantee_years': perf_guarantee_years,
-        'extended_warranty_y4_15': extended_warranty_y4_15,
-        'extended_warranty_y16_20': extended_warranty_y16_20,
+        'warranty_option': warranty_option,  # Added warranty option type
         'module_failure_rate': module_failure_rate,
         'serial_defect_prob': serial_defect_prob,
         'avg_repair_time': avg_repair_time,
         'augmentation_threshold': augmentation_threshold
     }
+    
+    # Add appropriate warranty parameters based on option
+    if warranty_option == "Performance Guarantee Only":
+        sim_params['perf_only_y4_10'] = perf_only_y4_10
+        sim_params['perf_only_y11_15'] = perf_only_y11_15
+        sim_params['extended_warranty_y4_15'] = 0
+        sim_params['extended_warranty_y16_20'] = 0
+    else:
+        sim_params['extended_warranty_y4_15'] = extended_warranty_y4_15
+        sim_params['extended_warranty_y16_20'] = extended_warranty_y16_20
     
     progress_text.text(f'Running {num_simulations:,} Monte Carlo iterations...')
     progress_bar.progress(50)
@@ -631,11 +688,28 @@ if run_simulation:
     st.markdown("---")
     st.markdown("## Analysis Results")
     
+    # Add warranty option to title
+    if warranty_option == "Performance Guarantee Only":
+        st.caption("Analyzing: Performance Guarantee Only (no warranty coverage)")
+    else:
+        st.caption("Analyzing: Full Warranty + Performance Guarantee")
+    
     # Key metrics - clean card layout
     mean_value = np.mean(results['guarantee_value']) / 1e6
     prob_positive = np.sum(results['guarantee_value'] > 0) / len(results['guarantee_value']) * 100
     var_95 = np.percentile(results['guarantee_value'], 5) / 1e6
-    roi = (mean_value / (initial_capex * (extended_warranty_y4_15/100) * project_lifetime)) * 100
+    
+    # Calculate ROI based on warranty option
+    if warranty_option == "Performance Guarantee Only":
+        total_warranty_cost = initial_capex * (perf_only_y4_10/100)
+        if project_lifetime > 10:
+            total_warranty_cost += initial_capex * (perf_only_y11_15/100)
+        roi = (mean_value / total_warranty_cost) * 100 if total_warranty_cost > 0 else 0
+    else:
+        total_warranty_cost = initial_capex * (extended_warranty_y4_15/100) * min(12, project_lifetime - 3)
+        if project_lifetime > 15:
+            total_warranty_cost += initial_capex * (extended_warranty_y16_20/100) * (project_lifetime - 15)
+        roi = (mean_value / total_warranty_cost) * 100 if total_warranty_cost > 0 else 0
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -661,19 +735,19 @@ if run_simulation:
     col1, col2 = st.columns(2)
     
     with col1:
-        # NPV Distribution - minimal color palette
+        # NPV Distribution - higher contrast colors
         fig1 = go.Figure()
         fig1.add_trace(go.Histogram(
             x=results['npv_with_guarantee']/1e6,
             name='With Guarantee',
-            marker_color='#333',
-            opacity=0.7
+            marker_color='#2E7D32',  # Dark green for with guarantee
+            opacity=0.75
         ))
         fig1.add_trace(go.Histogram(
             x=results['npv_without_guarantee']/1e6,
             name='Without Guarantee',
-            marker_color='#999',
-            opacity=0.7
+            marker_color='#C62828',  # Dark red for without guarantee
+            opacity=0.75
         ))
         fig1.update_layout(
             title='NPV Distribution Comparison',
@@ -774,9 +848,16 @@ if run_simulation:
     st.markdown("### Strategic Recommendations")
     
     # Calculate additional metrics
-    warranty_total_cost = initial_capex * 1e6 * (extended_warranty_y4_15/100) * min(12, project_lifetime)
-    if project_lifetime > 15:
-        warranty_total_cost += initial_capex * 1e6 * (extended_warranty_y16_20/100) * (project_lifetime - 15)
+    if warranty_option == "Performance Guarantee Only":
+        # Calculate total cost for performance guarantee only
+        warranty_total_cost = initial_capex * 1e6 * (perf_only_y4_10/100)  # Years 4-10 total
+        if project_lifetime > 10:
+            warranty_total_cost += initial_capex * 1e6 * (perf_only_y11_15/100)  # Years 11-15 total
+    else:
+        # Calculate annual payments for warranty + performance guarantee
+        warranty_total_cost = initial_capex * 1e6 * (extended_warranty_y4_15/100) * min(12, project_lifetime)
+        if project_lifetime > 15:
+            warranty_total_cost += initial_capex * 1e6 * (extended_warranty_y16_20/100) * (project_lifetime - 15)
     
     breakeven_degradation = annual_degradation * (1 + warranty_total_cost / (initial_capex * 1e6))
     irr_threshold = discount_rate + 2.0
@@ -882,4 +963,4 @@ if run_simulation:
 
 # Footer with minimal information
 st.markdown("---")
-st.caption("Monte Carlo simulation based on Warranty Agreement")
+st.caption("Monte Carlo simulation for battery energy storage system warranty valuation")
