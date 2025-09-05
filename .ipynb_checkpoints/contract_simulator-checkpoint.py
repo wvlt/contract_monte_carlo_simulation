@@ -331,7 +331,7 @@ with tab2:
             "Capacity Payment Rate ($/MWh)",
             value=50000,
             min_value=0,
-            max_value=200000,
+            max_value=300000,
             step=5000,
             format="%d",
             help="Annual payment per MWh of available capacity (after division by 4)"
