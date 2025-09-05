@@ -313,37 +313,60 @@ with tab2:
             format="%.1f"
         )
     
-    st.markdown("#### Additional Revenue Streams")
+    st.markdown("#### Capacity Payment Configuration")
+    
+    # Display the engineer's formula
+    st.info("""
+    **Capacity Payment Formula:**
+    
+    `Annual Capacity Payment ($) = (Available MWh at POC / 4) × $/MWh Rate`
+    
+    Where: `Available MWh at POC = Nameplate MWh × SOH × RTE`
+    """)
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
         capacity_payment_rate = st.number_input(
-            "Capacity Payment ($/MW/year)",
+            "Capacity Payment Rate ($/MWh)",
             value=50000,
             min_value=0,
             max_value=200000,
             step=5000,
             format="%d",
-            help="Annual payment per MW of available capacity"
+            help="Annual payment per MWh of available capacity (after division by 4)"
         )
         
     with col2:
-        ancillary_revenue = st.number_input(
-            "Ancillary Services ($/MWh)",
-            value=5.0,
-            min_value=0.0,
-            max_value=20.0,
-            format="%.1f"
-        )
-        
-    with col3:
         rte_for_capacity = st.number_input(
             "RTE for Capacity (%)",
             value=86.0,
             min_value=80.0,
             max_value=95.0,
             format="%.1f",
-            help="Round-trip efficiency at grid connection point"
+            help="Round-trip efficiency at grid connection point (POC)"
+        )
+        
+    with col3:
+        # Show example calculation at 100% SOH
+        example_capacity = initial_capacity * 1.0 * (rte_for_capacity/100) / 4
+        example_payment = example_capacity * capacity_payment_rate / 1e6
+        st.metric(
+            "Example at 100% SOH",
+            f"${example_payment:.2f}M/year",
+            help=f"{initial_capacity:.2f} MWh × 100% × {rte_for_capacity:.0f}% / 4 × ${capacity_payment_rate:,}"
+        )
+    
+    st.markdown("#### Additional Revenue Streams")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        ancillary_revenue = st.number_input(
+            "Ancillary Services ($/MWh)",
+            value=5.0,
+            min_value=0.0,
+            max_value=20.0,
+            format="%.1f"
         )
     
     # Variable O&M Recovery
@@ -764,7 +787,7 @@ class BESSMonteCarloSimulation:
         return capacity_retention
     
     def calculate_revenue(self, year, capacity_retention, cycles):
-        """Calculate annual revenue"""
+        """Calculate annual revenue with CORRECTED capacity payment formula"""
         effective_capacity = self.params['initial_capacity'] * (capacity_retention/100)
         
         # Energy arbitrage revenue
@@ -778,10 +801,17 @@ class BESSMonteCarloSimulation:
             (self.params['roundtrip_efficiency']/100)
         )
         
-        # Capacity payment
+        # CORRECTED CAPACITY PAYMENT CALCULATION
+        # Engineer's formula: (Available MWh at POC / 4) × Rate
         soh = capacity_retention / 100
         
-        # Apply capacity impact model
+        # Calculate available MWh at point of connection (POC)
+        available_mwh_at_poc = self.params['initial_capacity'] * soh * (self.params['rte_for_capacity']/100)
+        
+        # Apply engineer's formula: divide by 4, then multiply by rate
+        capacity_revenue = (available_mwh_at_poc / 4) * self.params['capacity_payment_rate']
+        
+        # Apply capacity impact model (optional degradation factor)
         if self.params.get('capacity_impact_mode') == "Minimal Impact (Step Function)":
             capacity_factor = 1.0 if soh > 0.7 else 0.95
         elif self.params.get('capacity_impact_mode') == "Conservative (Accelerated)":
@@ -789,9 +819,7 @@ class BESSMonteCarloSimulation:
         else:  # Linear with SOH
             capacity_factor = soh
         
-        # Calculate capacity payment (convert MW to MWh for payment calculation)
-        available_mw = self.params['power_rating'] * soh
-        capacity_revenue = available_mw * self.params['capacity_payment_rate'] * capacity_factor
+        capacity_revenue *= capacity_factor
         
         # Ancillary services
         ancillary_revenue = effective_capacity * cycles * self.params['ancillary_revenue']
